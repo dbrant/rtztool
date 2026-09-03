@@ -1,4 +1,12 @@
-# rtztool — unpack and repack Return to Zork
+# rtztool: unpack and repack Return to Zork
+
+Disclaimer: not affiliated with Activision; for research and education purposes only.
+
+Dmitry Brant, 2026, feat. Claude Code.
+
+---
+
+This is a toolkit for unpacking and repacking the assets of the classic game Return to Zork. Once unpacked, the assets (graphics, animations, sounds, fonts, text) can be edited to your heart's content. When finished, the assets can be repackaged and will appear in the game!
 
 Return to Zork (Activision, 1993) runs on Activision's **MADE** engine. Its data
 lives in four file formats, all of which this toolkit reads *and* writes:
@@ -10,7 +18,7 @@ lives in four file formats, all of which this toolkit reads *and* writes:
 | `*.PMV` | the full-motion cutscenes (video + audio) | `rtztool pmv` |
 | `RTZCD.RED` | LZH archive holding `RTZCD.DAT` and the DOS executables | `rtztool red` |
 
-Requires Python 3.8+ and nothing else — no third-party packages.
+Requires Python 3.8+, with no other dependencies.
 
 ## Quick start
 
@@ -52,8 +60,8 @@ out of the source archive, so nothing degrades through repeated round trips.
 
 ### Where the game's text is
 
-Almost all visible prose — descriptions, dialogue, verbs, the notebook, the
-endgame — is in the 49 `MENU` resources (1401 strings, ~46 000 characters). The
+Almost all visible prose (descriptions, dialogue, verbs, the notebook, the
+endgame) is in the 49 `MENU` resources (1401 strings, ~46 000 characters). The
 scripts pull them in at runtime with `sfReadMenu(object, menu, index)`. Edit
 `mod/MENU/*.txt`, one string per line, and rebuild. `RTZCD.DAT` holds only about
 570 further strings, mostly debug output, `printf` templates, save file names and
