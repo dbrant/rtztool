@@ -71,13 +71,17 @@ the `.PMV` filenames.
 
 The PNGs are 8-bit palettized. If your editor preserves the palette and indices
 (most do for indexed PNGs), the pixels come back exactly. If you save RGB or
-RGBA instead, colours are matched to the picture's original palette. Changing a
+RGBA instead, colors are matched to the picture's original palette. Changing a
 picture's PLTE changes the palette the game loads with that picture.
 
-The codec stores each 4×4 block as one of: a solid colour, two colours plus a
-1-bit mask, four colours plus a 2-bit mask, or 16 literal bytes. The encoder
+An example workflow for editing the pictures in GIMP would be:
+* Find the "background" illustration for the scene you want to edit. For example, `BESIMO00` is the interior of Moodock's shop. These background images contain the correct palette for the scene. This opens naturally in GIMP, and you can make any edits you like, and save any changes by selecting File -> Overwrite ___.png.
+* For editing any other sprite that appears in the scene, find the sprite (for example `CMAISL60` is Moodock sitting down) and open it in GIMP, while keeping the background image also open. These sprites do not contain the correct palette information, but you can go to Colors -> Map -> Set Colormap, which then lets you select the "Colormap of Image #1". This will apply the colormap of the background image to the sprite. You can then edit the sprite, and save any changes by selecting File -> Overwrite ___.png. Don't worry about writing a different palette into the sprite; it will be handled automatically by the repacking.
+
+The codec stores each 4×4 block as one of: a solid color, two colors plus a
+1-bit mask, four colors plus a 2-bit mask, or 16 literal bytes. The encoder
 picks whichever fits, so any image round-trips losslessly. `--lossy` disables the
-literal mode and reduces busy blocks to four colours instead, matching what the
+literal mode and reduces busy blocks to four colors instead, matching what the
 original tools did and producing slightly smaller data.
 
 ### Sounds
@@ -267,7 +271,7 @@ byte, low bits first, `line_size = ceil(ceil(width / 4) / 4)` bytes per band.
 
 | cmd | pixel stream | mask stream | meaning |
 |---|---|---|---|
-| 0 | 1 byte | — | solid colour |
+| 0 | 1 byte | — | solid color |
 | 1 | 2 bytes | u16 | 1 bit per pixel selects between them |
 | 2 | 4 bytes | u32 | 2 bits per pixel |
 | 3 | — | 16 bytes | 16 literal pixels (in a still picture) |
