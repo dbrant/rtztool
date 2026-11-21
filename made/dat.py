@@ -1,7 +1,8 @@
 """The MADE game database -- ``RTZCD.DAT``.
 
 This is the file that holds the game itself: every object, every string of text
-and every script.  Return to Zork uses the version 3 format.
+and every script.  Return to Zork uses the version 3 format (209 on DOS, 210 on
+Macintosh MPEG).
 
 File header::
 
@@ -46,23 +47,30 @@ HEADER_SIZE = 54
 
 class Object(object):
     __slots__ = ("index", "flags", "cls", "size", "count1", "count2", "data",
-                 "constant", "offset")
+                 "constant", "offset", "endian", "version")
 
-    def __init__(self, index, flags, cls, raw, constant, offset):
+    def __init__(self, index, flags, cls, raw, constant, offset, endian="<", version=209):
         self.index = index
         self.flags = flags
         self.cls = cls
         self.constant = constant
         self.offset = offset
+        self.endian = endian
+        self.version = version
         if cls == CLASS_BYTE_ARRAY:
-            (self.size,) = struct.unpack_from("<H", raw, 4)
+            (self.size,) = struct.unpack_from(endian + "H", raw, 4)
             self.count1 = self.count2 = 0
             data_size = self.size
         elif cls == CLASS_WORD_ARRAY:
-            (n,) = struct.unpack_from("<H", raw, 4)
+            (n,) = struct.unpack_from(endian + "H", raw, 4)
             self.size = n
             self.count1 = self.count2 = 0
             data_size = n * 2
+        elif version == 210:
+            (n,) = struct.unpack_from(endian + "H", raw, 4)
+            self.size = n
+            self.count1 = self.count2 = n
+            data_size = n * 4
         else:
             self.count1 = raw[4]
             self.count2 = raw[5]
@@ -88,16 +96,23 @@ class Object(object):
 
     def words(self):
         n = len(self.data) // 2
-        return list(struct.unpack("<%dH" % n, self.data[:n * 2]))
+        return list(struct.unpack("%s%dH" % (self.endian, n), self.data[:n * 2]))
 
     def properties(self):
         """(property_id, is_inherited_flag, value) triples for a real object."""
         w = self.words()
         out = []
-        for i in range(self.count2):
-            pid = w[i]
-            value = w[self.count1 + i] if self.count1 + i < len(w) else 0
-            out.append((pid & 0x3FFF, pid & 0xC000, value))
+        if self.version == 210:
+            for i in range(self.size):
+                if i * 2 + 1 < len(w):
+                    pid = w[i * 2]
+                    value = w[i * 2 + 1]
+                    out.append((pid & 0x3FFF, pid & 0xC000, value))
+        else:
+            for i in range(self.count2):
+                pid = w[i]
+                value = w[self.count1 + i] if self.count1 + i < len(w) else 0
+                out.append((pid & 0x3FFF, pid & 0xC000, value))
         return out
 
     def text(self, encoding="cp850"):
@@ -128,6 +143,8 @@ class GameDatabase(object):
         self.object_offsets = []
         self.raw = b""
         self.tail = b""
+        self.endian = "<"
+        self.version = 209
 
     @classmethod
     def load(cls, path):
@@ -141,31 +158,45 @@ class GameDatabase(object):
             raise ValueError("not a MADE game database (header %r)" % data[:6])
         self = cls()
         self.raw = data
-        (self.header_unk,) = struct.unpack_from("<I", data, 6)
+
+        ver_le = struct.unpack_from("<H", data, 6)[0]
+        if ver_le in (209, 210):
+            self.endian = "<"
+            self.version = ver_le
+        else:
+            self.endian = ">"
+            self.version = struct.unpack_from(">H", data, 6)[0]
+
+        e = self.endian
+        v = self.version
+
+        (self.header_unk,) = struct.unpack_from(e + "I", data, 6)
         self.program_name = data[10:30]
-        (self.object_index_offs,) = struct.unpack_from("<I", data, 30)
-        (object_count,) = struct.unpack_from("<H", data, 34)
-        (self.game_state_offs,) = struct.unpack_from("<I", data, 36)
-        (game_state_size,) = struct.unpack_from("<I", data, 40)
-        (self.objects_offs,) = struct.unpack_from("<I", data, 44)
-        (self.objects_size,) = struct.unpack_from("<I", data, 48)
-        (self.main_code_index,) = struct.unpack_from("<H", data, 52)
+        (self.object_index_offs,) = struct.unpack_from(e + "I", data, 30)
+        (object_count,) = struct.unpack_from(e + "H", data, 34)
+        (self.game_state_offs,) = struct.unpack_from(e + "I", data, 36)
+        (game_state_size,) = struct.unpack_from(e + "I", data, 40)
+        (self.objects_offs,) = struct.unpack_from(e + "I", data, 44)
+        (self.objects_size,) = struct.unpack_from(e + "I", data, 48)
+        (self.main_code_index,) = struct.unpack_from(e + "H", data, 52)
 
         self.game_state = data[self.game_state_offs:self.game_state_offs + game_state_size]
         self.object_offsets = list(struct.unpack_from(
-            "<%dI" % object_count, data, self.object_index_offs))
+            "%s%dI" % (e, object_count), data, self.object_index_offs))
 
         for i, off in enumerate(self.object_offsets):
             if off & 1:
                 base = self.objects_offs + off - 1
                 raw = data[base:base + 6]
-                obj = Object(i + 1, *_peek(raw), raw=data[base:base + 6 + _data_size(raw)],
-                             constant=True, offset=base)
+                dsize = _data_size(raw, e, v)
+                obj = Object(i + 1, *_peek(raw, e), raw=data[base:base + 6 + dsize],
+                             constant=True, offset=base, endian=e, version=v)
             else:
                 raw = self.game_state[off:off + 6]
-                obj = Object(i + 1, *_peek(raw),
-                             raw=self.game_state[off:off + 6 + _data_size(raw)],
-                             constant=False, offset=off)
+                dsize = _data_size(raw, e, v)
+                obj = Object(i + 1, *_peek(raw, e),
+                             raw=self.game_state[off:off + 6 + dsize],
+                             constant=False, offset=off, endian=e, version=v)
             self.objects.append(obj)
         return self
 
@@ -178,7 +209,7 @@ class GameDatabase(object):
         return None
 
     def variable(self, index):
-        return struct.unpack_from("<h", self.game_state, index * 2)[0]
+        return struct.unpack_from(self.endian + "h", self.game_state, index * 2)[0]
 
     def code_objects(self):
         """Indices of byte arrays that look like compiled scripts."""
@@ -202,19 +233,10 @@ class GameDatabase(object):
     # ------------------------------------------------------------------ write
 
     def save(self, path, objects=None):
-        """Write the database back out, moving as little as possible.
-
-        A constant object that still fits its original slot is written back
-        where it was; one that grew is appended to the end of the constant
-        block and its entry in the object offset table is updated.  Variable
-        objects live in the game state and never move.
-
-        Keeping unchanged objects in place matters: ScummVM identifies the game
-        from the first 5000 bytes of this file, which is mostly the object
-        offset table.
-        """
         objects = objects if objects is not None else self.objects
         data = self.raw
+        e = self.endian
+        v = self.version
 
         block = bytearray(data[self.objects_offs:])
         offsets = list(self.object_offsets)
@@ -222,17 +244,17 @@ class GameDatabase(object):
         moved = []
 
         for obj in objects:
-            body = _pack_object(obj)
+            body = _pack_object(obj, e, v)
             if not obj.constant:
                 old = self.game_state[obj.offset:obj.offset + 6]
-                if len(body) != 6 + _data_size(old):
+                if len(body) != 6 + _data_size(old, e, v):
                     raise ValueError(
                         "object %d lives in the game state and cannot change size"
                         % obj.index)
                 state[obj.offset:obj.offset + len(body)] = body
                 continue
             rel = obj.offset - self.objects_offs
-            old_size = 6 + _data_size(data[obj.offset:obj.offset + 6])
+            old_size = 6 + _data_size(data[obj.offset:obj.offset + 6], e, v)
             if len(body) <= old_size:
                 block[rel:rel + len(body)] = body
                 offsets[obj.index - 1] = rel + 1
@@ -244,39 +266,43 @@ class GameDatabase(object):
                 moved.append(obj.index)
 
         out = bytearray(data[:self.object_index_offs])
-        out += struct.pack("<%dI" % len(offsets), *offsets)
+        out += struct.pack("%s%dI" % (e, len(offsets)), *offsets)
         out += data[len(out):self.game_state_offs]
         out += state
         out += data[len(out):self.objects_offs]
         out += block
 
         if moved:
-            struct.pack_into("<I", out, 48, len(block))
+            struct.pack_into(e + "I", out, 48, len(block))
         with open(path, "wb") as f:
             f.write(bytes(out))
         return len(out), moved
 
 
-def _peek(raw):
-    flags, cls = struct.unpack_from("<HH", raw, 0)
+def _peek(raw, endian="<"):
+    flags, cls = struct.unpack_from(endian + "HH", raw, 0)
     return flags, cls
 
 
-def _data_size(raw):
-    (cls,) = struct.unpack_from("<H", raw, 2)
+def _data_size(raw, endian="<", version=209):
+    (cls,) = struct.unpack_from(endian + "H", raw, 2)
     if cls == CLASS_BYTE_ARRAY:
-        return struct.unpack_from("<H", raw, 4)[0]
+        return struct.unpack_from(endian + "H", raw, 4)[0]
     if cls == CLASS_WORD_ARRAY:
-        return struct.unpack_from("<H", raw, 4)[0] * 2
+        return struct.unpack_from(endian + "H", raw, 4)[0] * 2
+    if version == 210:
+        return struct.unpack_from(endian + "H", raw, 4)[0] * 4
     return (raw[4] + raw[5]) * 2
 
 
-def _pack_object(obj):
-    out = bytearray(struct.pack("<HH", obj.flags, obj.cls))
+def _pack_object(obj, endian="<", version=209):
+    out = bytearray(struct.pack(endian + "HH", obj.flags, obj.cls))
     if obj.cls == CLASS_BYTE_ARRAY:
-        out += struct.pack("<H", len(obj.data))
+        out += struct.pack(endian + "H", len(obj.data))
     elif obj.cls == CLASS_WORD_ARRAY:
-        out += struct.pack("<H", len(obj.data) // 2)
+        out += struct.pack(endian + "H", len(obj.data) // 2)
+    elif version == 210:
+        out += struct.pack(endian + "H", len(obj.data) // 4)
     else:
         out += bytes((obj.count1, obj.count2))
     out += obj.data
