@@ -43,6 +43,7 @@ CLASS_BYTE_ARRAY = 0x7FFF
 CLASS_WORD_ARRAY = 0x7FFE
 
 HEADER_SIZE = 54
+SUPPORTED_VERSIONS = (209, 210)
 
 
 class Object(object):
@@ -160,12 +161,17 @@ class GameDatabase(object):
         self.raw = data
 
         ver_le = struct.unpack_from("<H", data, 6)[0]
-        if ver_le in (209, 210):
+        ver_be = struct.unpack_from(">H", data, 6)[0]
+        if ver_le in SUPPORTED_VERSIONS:
             self.endian = "<"
             self.version = ver_le
-        else:
+        elif ver_be in SUPPORTED_VERSIONS:
             self.endian = ">"
-            self.version = struct.unpack_from(">H", data, 6)[0]
+            self.version = ver_be
+        else:
+            raise ValueError(
+                "unsupported MADE database version (bytes %s at offset 6; expected %s)"
+                % (data[6:8].hex(" "), " or ".join(str(v) for v in SUPPORTED_VERSIONS)))
 
         e = self.endian
         v = self.version
@@ -233,6 +239,17 @@ class GameDatabase(object):
     # ------------------------------------------------------------------ write
 
     def save(self, path, objects=None):
+        """Write the database back out, moving as little as possible.
+
+        A constant object that still fits its original slot is written back
+        where it was; one that grew is appended to the end of the constant
+        block and its entry in the object offset table is updated.  Variable
+        objects live in the game state and never move.
+
+        Keeping unchanged objects in place matters: ScummVM identifies the game
+        from the first 5000 bytes of this file, which is mostly the object
+        offset table.
+        """
         objects = objects if objects is not None else self.objects
         data = self.raw
         e = self.endian
