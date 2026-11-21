@@ -66,10 +66,12 @@ def test_prj(path):
             bad += 1
     check("every DATA header checksum verifies", bad == 0, "%d mismatches" % bad)
 
+    stride = prj.image_stride
+    print("       platform %s, image stride %d" % (prj.platform, stride))
     counts = {}
     errors = []
-    for tag, fn in ((b"FLEX", resources.decode_picture),
-                    (b"ANIM", resources.decode_anim),
+    for tag, fn in ((b"FLEX", lambda p: resources.decode_picture(p, stride=stride)),
+                    (b"ANIM", lambda p: resources.decode_anim(p, stride=stride)),
                     (b"SNDS", resources.decode_sound),
                     (b"MENU", resources.decode_menu),
                     (b"FONT", resources.decode_font)):
@@ -100,9 +102,9 @@ def test_prj(path):
     bad = []
     grew = 0
     for res in sample:
-        pic = resources.decode_picture(res.payload)
-        enc = resources.encode_picture(pic, allow_raw=True)
-        again = resources.decode_picture(enc)
+        pic = resources.decode_picture(res.payload, stride=stride)
+        enc = resources.encode_picture(pic, allow_raw=True, stride=stride)
+        again = resources.decode_picture(enc, stride=stride)
         if bytes(again.indices) != bytes(pic.indices) or again.palette != pic.palette:
             bad.append(res.name)
         grew += len(enc) - len(res.payload)
@@ -113,9 +115,10 @@ def test_prj(path):
     sample = anims if os.environ.get("RTZ_FULL") else random.sample(anims, 25)
     bad = []
     for res in sample:
-        anim = resources.decode_anim(res.payload, accumulate=False)
-        again = resources.decode_anim(resources.encode_anim(anim, allow_raw=True),
-                                      accumulate=False)
+        anim = resources.decode_anim(res.payload, accumulate=False, stride=stride)
+        again = resources.decode_anim(
+            resources.encode_anim(anim, allow_raw=True, stride=stride),
+            accumulate=False, stride=stride)
         if len(again.frames) != len(anim.frames) or any(
                 bytes(a.indices) != bytes(b.indices)
                 for a, b in zip(anim.frames, again.frames)):
@@ -256,6 +259,27 @@ def test_pmv(paths):
                                                os.path.getsize(out)))
 
 
+def _packbits(data):
+    """Apple PackBits, for testing the decoder."""
+    out = bytearray()
+    i = 0
+    while i < len(data):
+        run = 1
+        while i + run < len(data) and run < 128 and data[i + run] == data[i]:
+            run += 1
+        if run >= 2:
+            out += bytes((257 - run, data[i]))
+            i += run
+            continue
+        j = i + 1
+        while j < len(data) and j - i < 128 and not (j + 1 < len(data) and data[j + 1] == data[j]):
+            j += 1
+        out.append(j - i - 1)
+        out += data[i:j]
+        i = j
+    return bytes(out)
+
+
 def test_codec_units():
     print("\ncodec unit checks")
     random.seed(7)
@@ -275,6 +299,28 @@ def test_codec_units():
         if bytes(out) != src:
             bad.append("%dx%d" % (width, height))
     check("random images survive the still-picture codec at odd sizes",
+          not bad, str(bad))
+
+    # Macintosh: a 640 stride, and streams that may be PackBits-compressed
+    bad = []
+    for width, height in ((354, 9), (637, 7), (640, 13)):
+        src = bytes(random.choice((0, 0, 0, 7, 7, random.randrange(256)))
+                    for _ in range(width * height))
+        streams = imagecodec.compress_image(src, width, height, allow_raw=True,
+                                            stride=imagecodec.MAC_STRIDE)
+        for flags in ((0, 0, 0), (1, 0, 0), (0, 1, 1), (1, 1, 1)):
+            parts = [_packbits(s) if f else s for s, f in zip(streams, flags)]
+            blob = bytes(64) + b"".join(parts)
+            cmd_offs = 64
+            pixel_offs = cmd_offs + len(parts[0])
+            mask_offs = pixel_offs + len(parts[1])
+            out = imagecodec.decompress_image(blob, width, height, cmd_offs,
+                                              pixel_offs, mask_offs,
+                                              imagecodec.line_size_for(width), *flags,
+                                              stride=imagecodec.MAC_STRIDE)
+            if bytes(out) != src:
+                bad.append("%dx%d flags %s" % (width, height, flags))
+    check("wide images survive the codec at the Macintosh stride, packed or not",
           not bad, str(bad))
 
     bad = []

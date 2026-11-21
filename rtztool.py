@@ -66,6 +66,7 @@ def cmd_prj_info(args):
     print("%s  %s" % (args.archive, human(total)))
     print("  header      unk1=%d unk2=%d ddit=%d/%d"
           % (prj.header_unk1, prj.header_unk2, prj.ddit_a, prj.ddit_b))
+    print("  platform    %s (image stride %d)" % (prj.platform, prj.image_stride))
     print("  %-6s %8s %8s %10s  %s" % ("type", "count", "capacity", "bytes", "names"))
     for tag in prj.type_order:
         name = tag.decode("ascii")
@@ -93,14 +94,15 @@ def cmd_prj_list(args):
             detail = ""
             if tag == b"FLEX":
                 try:
-                    pic = resources.decode_picture(res.payload)
+                    pic = resources.decode_picture(res.payload, stride=prj.image_stride)
                     detail = "%dx%d%s" % (pic.width, pic.height,
                                           " pal" if pic.palette else "")
                 except Exception:
                     detail = "?"
             elif tag == b"ANIM":
                 try:
-                    anim = resources.decode_anim(res.payload, accumulate=False)
+                    anim = resources.decode_anim(res.payload, accumulate=False,
+                                                 stride=prj.image_stride)
                     detail = "%dx%d %d frames%s" % (anim.width, anim.height,
                                                     len(anim.frames),
                                                     " delta" if anim.is_delta else "")
@@ -163,7 +165,7 @@ def cmd_prj_get(args):
             f.write(res.payload)
     elif tag == b"FLEX":
         from made import pngio
-        pic = resources.decode_picture(res.payload)
+        pic = resources.decode_picture(res.payload, stride=prj.image_stride)
         pal = pic.palette or assets.pick_reference_palette(prj)[0]
         pngio.write_palette_png(args.out, pic.width, pic.height, pic.indices, pal)
     elif tag == b"SNDS":

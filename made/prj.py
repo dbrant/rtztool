@@ -70,6 +70,8 @@ bytes, so the payload is what the individual codecs see.
 
 import struct
 
+from . import imagecodec
+
 MAGIC = b"PROJ"
 RES_HEADER_SIZE = 62
 INDX_ENTRY_SIZE = 8
@@ -219,6 +221,19 @@ class ProjectFile(object):
 
     def types(self):
         return [t for t in self.type_order if t not in BOOKKEEPING_TYPES]
+
+    @property
+    def platform(self):
+        """"mac" or "dos".  The Macintosh archive stores its music as standard
+        MIDI rather than XMIDI."""
+        if b"MIDI" in self.type_order and b"XMID" not in self.type_order:
+            return "mac"
+        return "dos"
+
+    @property
+    def image_stride(self):
+        """The engine's scratch line stride for this archive's pictures."""
+        return imagecodec.STRIDES[self.platform]
 
     def get(self, tag, index):
         return self.resources.get(tag, {}).get(index)

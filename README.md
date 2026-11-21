@@ -18,6 +18,11 @@ lives in four file formats, all of which this toolkit reads *and* writes:
 | `*.PMV` | the full-motion cutscenes (video + audio) | `rtztool pmv` |
 | `RTZCD.RED` | LZH archive holding `RTZCD.DAT` and the DOS executables | `rtztool red` |
 
+The Macintosh version's `.PRJ` archive is supported too, and detected
+automatically: its pictures and animations are higher resolution and mostly
+PackBits-compressed. Edited Macintosh pictures are written back uncompressed,
+which the Macintosh data also uses, but this has not been tested in the Mac game.
+
 Requires Python 3.8+, with no other dependencies.
 
 ## Quick start
@@ -249,7 +254,7 @@ The engine reads a resource by seeking to `slot.offset + 62` and reading
 
 ```
  0   1  u8  1 if a palette follows
- 1   3  u8  cmd / pixel / mask stream flags (bit 1 = 4-bit nibble mode)
+ 1   3  u8  cmd / pixel / mask stream flags (bit 0 = PackBits, bit 1 = 4-bit nibble mode)
  4   2  u16 offset of the command stream
  6   2  u16 offset of the pixel stream
  8   2  u16 offset of the mask stream
@@ -261,7 +266,11 @@ The engine reads a resource by seeking to `slot.offset + 62` and reading
         (always 256 in this game; 8 bits per channel, not VGA's 6)
 ```
 
-then the three streams. Return to Zork always uses flags 0 — plain bytes.
+then the three streams. On DOS nearly every picture uses flags 0 (plain bytes);
+eight use nibble mode for their pixel and mask streams. The Macintosh version
+compresses most streams with Apple's PackBits run-length encoding, each one
+independently. A compressed stream's length isn't stored, so it is expanded
+until it supplies as many bytes as the commands consume.
 
 ### The 4×4 block codec
 
@@ -285,7 +294,13 @@ never used. Deriving the last word's position needs the original's rounding:
 `last = (((line_size + 1) >> 1) << 1) - 2`.
 
 The decompressor also assembles each band in a scratch buffer with a hard-coded
-stride of 320, which is why no picture is wider than the screen.
+stride: 320 on DOS, 640 on the Macintosh (whose backgrounds are 640×480). A
+picture wider than the stride overlaps itself in that buffer, so a later
+block's top row lands on an earlier block's lower rows. One DOS picture,
+`ZFS0MU00` at 354 pixels wide, does this. rtztool reproduces the overlap, and
+its encoder treats the overwritten pixels as don't-care. The platform, and so
+the stride, is detected from the archive: the Macintosh one stores its music as
+standard MIDI (`MIDI`) rather than XMIDI (`XMID`).
 
 ### ANIM — sprite animations
 
@@ -309,12 +324,18 @@ Each frame:
  4   4  u32 0
  8   2  u16 width
 10   2  u16 height
-12   4  u32 command stream offset (26, i.e. straight after this header)
-16   4  u32 pixel stream offset
-20   4  u32 mask stream offset
+12   2  u16 command stream offset (26, i.e. straight after this header)
+14   2  u16 command stream flags
+16   2  u16 pixel stream offset
+18   2  u16 pixel stream flags
+20   2  u16 mask stream offset
+22   2  u16 mask stream flags
 24   2  u16 command bytes per row of blocks
 26   .  the three streams
 ```
+
+The stream flags mean the same as in a FLEX picture. Only the Macintosh version
+sets them (PackBits).
 
 Frames carry no palette; animations are drawn against whatever palette the
 current picture loaded. In a delta animation, pixel value 0 means transparent

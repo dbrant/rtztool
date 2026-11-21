@@ -17,23 +17,58 @@ The two command bits mean:
      Otherwise: 16 raw pixel bytes read from the *mask* stream.
 ===  ==========================================================
 
-Both the pixel and mask streams can be in nibble mode (flag bit 1), which the
-Return to Zork data never uses but which is implemented here for completeness.
+Each stream has a flags byte:
+
+* bit 0 -- the stream is PackBits-compressed (Macintosh only);
+* bit 1 -- the pixel or mask stream is in 4-bit nibble mode (a handful of DOS
+  pictures).
 
 Blocks are laid out left to right, then top to bottom, in rows of four scan
 lines.  Images are padded up to whole blocks in both directions; the padding is
 decoded but never copied out.
+
+Each band of four scan lines is assembled in a scratch buffer whose stride is
+fixed by the engine: 320 on DOS, 640 on the Macintosh.  A picture wider than the
+stride overlaps itself in that buffer, and the codec reproduces that.
 """
 
 import struct
 
-__all__ = ["decompress_image", "compress_image", "line_size_for", "block_stats"]
+__all__ = ["decompress_image", "compress_image", "line_size_for", "block_stats",
+           "unpackbits", "STRIDES", "DOS_STRIDE", "MAC_STRIDE"]
+
+DOS_STRIDE = 320
+MAC_STRIDE = 640
+STRIDES = {"dos": DOS_STRIDE, "mac": MAC_STRIDE}
+
+FLAG_PACKBITS = 1
+FLAG_NIBBLE = 2
 
 
 def line_size_for(width):
     """Bytes of command stream per row of blocks (2 bits per block)."""
     blocks = (width + 3) // 4
     return (blocks + 3) // 4
+
+
+def unpackbits(source, pos, limit):
+    """Expand Apple PackBits data starting at ``source[pos]``.
+
+    Stops once at least ``limit`` bytes have been produced or the input runs
+    out, since a stream's compressed length is not stored anywhere.
+    """
+    out = bytearray()
+    end = len(source)
+    while len(out) < limit and pos < end:
+        n = source[pos]
+        pos += 1
+        if n < 128:
+            out += source[pos:pos + n + 1]
+            pos += n + 1
+        elif n > 128 and pos < end:
+            out += bytes((source[pos],)) * (257 - n)
+            pos += 1
+    return bytes(out)
 
 
 class _ValueReader(object):
@@ -74,34 +109,53 @@ class _ValueReader(object):
 
 def decompress_image(source, width, height, cmd_offs, pixel_offs, mask_offs,
                      line_size, cmd_flags=0, pixel_flags=0, mask_flags=0,
-                     delta_frame=False, base=None, stats=None):
+                     delta_frame=False, base=None, stats=None, stride=DOS_STRIDE):
     """Decode one image.  Returns a ``bytearray`` of ``width * height`` indices.
 
     ``base`` supplies the previous frame for delta animations; when omitted a
-    transparent (zero-filled) canvas is used.
+    transparent (zero-filled) canvas is used.  ``stride`` is the engine's
+    scratch line stride (see the module docstring).
     """
-    if cmd_flags:
+    if cmd_flags & ~FLAG_PACKBITS:
         raise ValueError("unsupported cmd flags 0x%02X" % cmd_flags)
 
     out = bytearray(base) if base is not None else bytearray(width * height)
     if base is not None and len(out) != width * height:
         raise ValueError("base frame size mismatch")
 
-    mask = _ValueReader(source, mask_offs, bool(mask_flags & 2))
-    pixel = _ValueReader(source, pixel_offs, bool(pixel_flags & 2))
-    cmd_pos = cmd_offs
+    blocks = ((width + 3) // 4) * ((height + 3) // 4)
+    if cmd_flags & FLAG_PACKBITS:
+        source_cmd = unpackbits(source, cmd_offs, ((height + 3) // 4) * line_size)
+        cmd_pos = 0
+    else:
+        source_cmd = source
+        cmd_pos = cmd_offs
+
+    # Every block takes at most 4 pixel bytes and 16 mask bytes, which bounds
+    # how much of a compressed stream needs expanding.
+    if pixel_flags & FLAG_PACKBITS:
+        pixel = _ValueReader(unpackbits(source, pixel_offs, 4 * blocks), 0,
+                             bool(pixel_flags & FLAG_NIBBLE))
+    else:
+        pixel = _ValueReader(source, pixel_offs, bool(pixel_flags & FLAG_NIBBLE))
+    if mask_flags & FLAG_PACKBITS:
+        mask = _ValueReader(unpackbits(source, mask_offs, 16 * blocks), 0,
+                            bool(mask_flags & FLAG_NIBBLE))
+    else:
+        mask = _ValueReader(source, mask_offs, bool(mask_flags & FLAG_NIBBLE))
 
     last_ofs = (((line_size + 1) >> 1) << 1) - 2
     last_count = ((width + 3) >> 2) & 7
     if last_count == 0:
         last_count = 8
 
-    line = bytearray(320 * 4)
+    s1, s2, s3 = stride, 2 * stride, 3 * stride
+    line = bytearray(3 * stride + max(width, stride) + 4)
     y0 = 0
     while y0 < height:
         for i in range(len(line)):
             line[i] = 0
-        row_cmds = bytes(source[cmd_pos:cmd_pos + line_size]) + b"\x00\x00"
+        row_cmds = bytes(source_cmd[cmd_pos:cmd_pos + line_size]) + b"\x00\x00"
         cmd_pos += line_size
 
         dest = 0
@@ -118,9 +172,9 @@ def decompress_image(source, width, height, cmd_offs, pixel_offs, mask_offs,
                     p = pixel.pixel()
                     blk = bytes((p, p, p, p))
                     line[dest:dest + 4] = blk
-                    line[dest + 320:dest + 324] = blk
-                    line[dest + 640:dest + 644] = blk
-                    line[dest + 960:dest + 964] = blk
+                    line[dest + s1:dest + s1 + 4] = blk
+                    line[dest + s2:dest + s2 + 4] = blk
+                    line[dest + s3:dest + s3 + 4] = blk
                 elif cmd == 1:
                     p0 = pixel.pixel()
                     p1 = pixel.pixel()
@@ -128,30 +182,30 @@ def decompress_image(source, width, height, cmd_offs, pixel_offs, mask_offs,
                     pal = (p0, p1)
                     blk = bytes(pal[(m >> i) & 1] for i in range(16))
                     line[dest:dest + 4] = blk[0:4]
-                    line[dest + 320:dest + 324] = blk[4:8]
-                    line[dest + 640:dest + 644] = blk[8:12]
-                    line[dest + 960:dest + 964] = blk[12:16]
+                    line[dest + s1:dest + s1 + 4] = blk[4:8]
+                    line[dest + s2:dest + s2 + 4] = blk[8:12]
+                    line[dest + s3:dest + s3 + 4] = blk[12:16]
                 elif cmd == 2:
                     pal = (pixel.pixel(), pixel.pixel(), pixel.pixel(), pixel.pixel())
                     m = mask.u32()
                     blk = bytes(pal[(m >> (2 * i)) & 3] for i in range(16))
                     line[dest:dest + 4] = blk[0:4]
-                    line[dest + 320:dest + 324] = blk[4:8]
-                    line[dest + 640:dest + 644] = blk[8:12]
-                    line[dest + 960:dest + 964] = blk[12:16]
+                    line[dest + s1:dest + s1 + 4] = blk[4:8]
+                    line[dest + s2:dest + s2 + 4] = blk[8:12]
+                    line[dest + s3:dest + s3 + 4] = blk[12:16]
                 elif not delta_frame:
                     mask.reset_nibble()
                     blk = bytes(mask.pixel() for _ in range(16))
                     line[dest:dest + 4] = blk[0:4]
-                    line[dest + 320:dest + 324] = blk[4:8]
-                    line[dest + 640:dest + 644] = blk[8:12]
-                    line[dest + 960:dest + 964] = blk[12:16]
+                    line[dest + s1:dest + s1 + 4] = blk[4:8]
+                    line[dest + s2:dest + s2 + 4] = blk[8:12]
+                    line[dest + s3:dest + s3 + 4] = blk[12:16]
                 dest += 4
 
         for y in range(4):
             if y0 + y >= height:
                 break
-            src = line[y * 320:y * 320 + width]
+            src = line[y * stride:y * stride + width]
             row = (y0 + y) * width
             if delta_frame:
                 for x in range(width):
@@ -234,18 +288,15 @@ def _reduce_to_four(block, palette):
     return chosen
 
 
-SCRATCH_STRIDE = 320
-
-
-def _effective(block_index, row, blocks):
+def _effective(block_index, row, blocks, stride):
     """Is this block's write to the scratch line buffer the one that survives?
 
     The decoder assembles each band of four scan lines in a buffer with a fixed
-    stride of 320, so for a picture wider than 320 pixels a later block's row 0
-    lands on top of an earlier block's row 1.  Whatever gets overwritten is a
+    stride, so for a picture wider than the stride a later block's row 0 lands
+    on top of an earlier block's row 1.  Whatever gets overwritten is a
     don't-care as far as the encoder is concerned.
     """
-    step = SCRATCH_STRIDE // 4
+    step = stride // 4
     for earlier in range(row):
         if block_index + step * (row - earlier) < blocks:
             return False
@@ -253,8 +304,8 @@ def _effective(block_index, row, blocks):
 
 
 def compress_image(indices, width, height, palette=None, delta_frame=False,
-                   allow_raw=False, transparent=0):
-    """Encode an image into (cmd, pixel, mask) streams.
+                   allow_raw=False, transparent=0, stride=DOS_STRIDE):
+    """Encode an image into uncompressed (cmd, pixel, mask) streams.
 
     ``indices``    -- width*height palette indices
     ``palette``    -- 768-byte RGB table, used when a block needs colour
@@ -264,6 +315,7 @@ def compress_image(indices, width, height, palette=None, delta_frame=False,
     ``allow_raw``  -- emit command 3 with 16 literal bytes for blocks with more
                       than four colours instead of reducing them.  Lossless,
                       but only valid for non-delta images.
+    ``stride``     -- the engine's scratch line stride the image is meant for.
 
     Returns ``(cmd, pixel, mask)`` as bytes objects.
     """
@@ -273,7 +325,7 @@ def compress_image(indices, width, height, palette=None, delta_frame=False,
     blocks = (width + 3) // 4
     bands = (height + 3) // 4
     line_size = line_size_for(width)
-    scratch_len = 3 * SCRATCH_STRIDE + max(width, SCRATCH_STRIDE) + 4
+    scratch_len = 3 * stride + max(width, stride) + 4
 
     cmd = bytearray()
     pixel = bytearray()
@@ -288,7 +340,7 @@ def compress_image(indices, width, height, palette=None, delta_frame=False,
                 break
             base = line * width
             for x in range(width):
-                p = y * SCRATCH_STRIDE + x
+                p = y * stride + x
                 values[p] = indices[base + x]
                 care[p] = 1
 
@@ -297,9 +349,9 @@ def compress_image(indices, width, height, palette=None, delta_frame=False,
             block = bytearray(16)
             wanted = []
             for r in range(4):
-                live = _effective(b, r, blocks)
+                live = _effective(b, r, blocks, stride)
                 for c in range(4):
-                    p = 4 * b + SCRATCH_STRIDE * r + c
+                    p = 4 * b + stride * r + c
                     if live and care[p]:
                         block[r * 4 + c] = values[p]
                         wanted.append(r * 4 + c)

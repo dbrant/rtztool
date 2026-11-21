@@ -23,6 +23,7 @@ import os
 import re
 import struct
 
+from . import imagecodec
 from . import pngio
 from . import resources
 from .prj import ProjectFile, Resource, patch_archive
@@ -56,13 +57,13 @@ def pick_reference_palette(prj, name=None):
         res = prj.by_name(b"FLEX", name)
         if res is None:
             raise KeyError("no FLEX resource named %r" % name)
-        pic = resources.decode_picture(res.payload)
+        pic = resources.decode_picture(res.payload, stride=prj.image_stride)
         if pic.palette:
             return pic.palette, name
     for index in sorted(prj.resources.get(b"FLEX", {})):
         res = prj.resources[b"FLEX"][index]
         try:
-            pic = resources.decode_picture(res.payload)
+            pic = resources.decode_picture(res.payload, stride=prj.image_stride)
         except Exception:
             continue
         if pic.palette and pic.width >= 320:
@@ -307,7 +308,7 @@ def extract(prj_path, outdir, sound_rate=DEFAULT_SOUND_RATE, palette_name=None,
             }
             try:
                 files = _extract_one(tag, res, outdir, name, base, entry,
-                                     ref_palette, sound_rate)
+                                     ref_palette, sound_rate, prj.image_stride)
             except Exception as exc:                       # noqa: BLE001
                 path = os.path.join(outdir, name, base + ".bin")
                 with open(path, "wb") as f:
@@ -335,11 +336,12 @@ def extract(prj_path, outdir, sound_rate=DEFAULT_SOUND_RATE, palette_name=None,
     return manifest
 
 
-def _extract_one(tag, res, outdir, type_dir, base, entry, ref_palette, sound_rate):
+def _extract_one(tag, res, outdir, type_dir, base, entry, ref_palette, sound_rate,
+                 stride):
     rel = lambda *p: os.path.join(type_dir, *p)
 
     if tag == b"FLEX":
-        pic = resources.decode_picture(res.payload)
+        pic = resources.decode_picture(res.payload, stride=stride)
         entry["format"] = "picture"
         entry["width"] = pic.width
         entry["height"] = pic.height
@@ -350,7 +352,7 @@ def _extract_one(tag, res, outdir, type_dir, base, entry, ref_palette, sound_rat
         return [path]
 
     if tag == b"ANIM":
-        anim = resources.decode_anim(res.payload, accumulate=False)
+        anim = resources.decode_anim(res.payload, accumulate=False, stride=stride)
         entry["format"] = "animation"
         entry["width"] = anim.width
         entry["height"] = anim.height
@@ -465,7 +467,7 @@ def build(indir, source_prj, out_prj, allow_raw=True, progress=None, force=False
             if not dirty:
                 continue
             payload = _encode_one(tag, indir, entry, ref_palette, allow_raw,
-                                  src.get(tag, index))
+                                  src.get(tag, index), src.image_stride)
             changes.setdefault(tag, {})[index] = payload
             names.setdefault(tag, {})[index] = entry["name"]
             changed += 1
@@ -499,7 +501,8 @@ def build(indir, source_prj, out_prj, allow_raw=True, progress=None, force=False
     return changed, result.size, result
 
 
-def _encode_one(tag, indir, entry, ref_palette, allow_raw, original=None):
+def _encode_one(tag, indir, entry, ref_palette, allow_raw, original=None,
+                stride=imagecodec.DOS_STRIDE):
     fmt = entry.get("format", "raw")
     files = entry["files"]
 
@@ -510,7 +513,8 @@ def _encode_one(tag, indir, entry, ref_palette, allow_raw, original=None):
         base_palette = ref_palette
         if original is not None:
             try:
-                base_palette = resources.decode_picture(original.payload).palette or ref_palette
+                base_palette = resources.decode_picture(
+                    original.payload, stride=stride).palette or ref_palette
             except Exception:                                   # noqa: BLE001
                 pass
         idx, w, h, new_pal = png_to_indices(path, base_palette)
@@ -518,7 +522,7 @@ def _encode_one(tag, indir, entry, ref_palette, allow_raw, original=None):
         if entry.get("has_palette", True):
             palette = new_pal or base_palette
         pic = resources.Picture(w, h, idx, palette)
-        return resources.encode_picture(pic, allow_raw=allow_raw)
+        return resources.encode_picture(pic, allow_raw=allow_raw, stride=stride)
 
     if fmt == "animation":
         meta_path = os.path.join(indir, files[-1])
@@ -531,7 +535,7 @@ def _encode_one(tag, indir, entry, ref_palette, allow_raw, original=None):
             frames.append(resources.AnimFrame(w, h, idx, 0, fi.get("unk1", 0)))
         anim = resources.Animation(meta["width"], meta["height"], meta["flags"],
                                    frames, meta.get("header_unk"))
-        return resources.encode_anim(anim, ref_palette, allow_raw=allow_raw)
+        return resources.encode_anim(anim, ref_palette, allow_raw=allow_raw, stride=stride)
 
     if fmt == "sound":
         samples, _rate = read_wav(os.path.join(indir, files[0]))

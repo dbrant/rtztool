@@ -32,7 +32,7 @@ class Picture(object):
             self.width, self.height, "paletted" if self.palette else "no palette")
 
 
-def decode_picture(payload, stats=None):
+def decode_picture(payload, stats=None, stride=imagecodec.DOS_STRIDE):
     if len(payload) < PIC_HEADER_SIZE:
         raise ValueError("picture payload too short (%d bytes)" % len(payload))
     has_palette = payload[0] != 0
@@ -49,13 +49,14 @@ def decode_picture(payload, stats=None):
 
     indices = imagecodec.decompress_image(
         payload, width, height, cmd_offs, pixel_offs, mask_offs, line_size,
-        cmd_flags, pixel_flags, mask_flags, stats=stats)
+        cmd_flags, pixel_flags, mask_flags, stats=stats, stride=stride)
     return Picture(width, height, indices, palette)
 
 
-def encode_picture(pic, allow_raw=False):
+def encode_picture(pic, allow_raw=False, stride=imagecodec.DOS_STRIDE):
     cmd, pixel, mask = imagecodec.compress_image(
-        pic.indices, pic.width, pic.height, pic.palette, allow_raw=allow_raw)
+        pic.indices, pic.width, pic.height, pic.palette, allow_raw=allow_raw,
+        stride=stride)
 
     pal = pic.palette or b""
     cmd_offs = PIC_HEADER_SIZE + len(pal)
@@ -106,13 +107,15 @@ class Animation(object):
             self.width, self.height, self.flags, len(self.frames))
 
 
-def decode_anim(payload, accumulate=True):
+def decode_anim(payload, accumulate=True, stride=imagecodec.DOS_STRIDE):
     """Decode an animation.
 
     Delta animations store only the changes from the previous frame.  With
     ``accumulate`` the frames are composited so each one is a complete picture;
     with ``accumulate=False`` the raw per-frame deltas are returned (0 meaning
     "unchanged").
+
+    Each frame's three stream offsets are u16 offset + u16 stream flags pairs.
     """
     if payload[0:4] != b"ANIM":
         raise ValueError("not an ANIM payload (%r)" % payload[0:4])
@@ -129,7 +132,8 @@ def decode_anim(payload, accumulate=True):
         (frame_offs,) = struct.unpack_from("<I", payload, 26 + i * 4)
         f_unk0, f_unk1 = struct.unpack_from("<2I", payload, frame_offs)
         fw, fh = struct.unpack_from("<2H", payload, frame_offs + 8)
-        cmd_offs, pixel_offs, mask_offs = struct.unpack_from("<3I", payload, frame_offs + 12)
+        cmd_offs, cmd_flags, pixel_offs, pixel_flags, mask_offs, mask_flags = \
+            struct.unpack_from("<6H", payload, frame_offs + 12)
         (line_size,) = struct.unpack_from("<H", payload, frame_offs + 24)
 
         base = None
@@ -138,7 +142,8 @@ def decode_anim(payload, accumulate=True):
         indices = imagecodec.decompress_image(
             memoryview(payload)[frame_offs:], fw, fh,
             cmd_offs, pixel_offs, mask_offs, line_size,
-            delta_frame=delta, base=base)
+            cmd_flags, pixel_flags, mask_flags,
+            delta_frame=delta, base=base, stride=stride)
         if delta and accumulate:
             prev = indices
         frames.append(AnimFrame(fw, fh, indices, f_unk0, f_unk1))
@@ -147,12 +152,13 @@ def decode_anim(payload, accumulate=True):
                      {"a": unk_a, "b": unk_b, "c": unk_c, "d": unk_d})
 
 
-def encode_anim(anim, palette=None, allow_raw=False):
+def encode_anim(anim, palette=None, allow_raw=False, stride=imagecodec.DOS_STRIDE):
     frame_blobs = []
     for frame in anim.frames:
         cmd, pixel, mask = imagecodec.compress_image(
             frame.indices, frame.width, frame.height, palette,
-            delta_frame=anim.is_delta, allow_raw=allow_raw and not anim.is_delta)
+            delta_frame=anim.is_delta, allow_raw=allow_raw and not anim.is_delta,
+            stride=stride)
         cmd_offs = 26
         pixel_offs = cmd_offs + len(cmd)
         mask_offs = pixel_offs + len(pixel)
