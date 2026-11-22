@@ -4,6 +4,8 @@ Disclaimer: not affiliated with Activision; for research and education purposes 
 
 Dmitry Brant, 2026, feat. Claude Code.
 
+License: MIT
+
 ---
 
 This is a toolkit for unpacking and repacking the assets of the classic game Return to Zork. Once unpacked, the assets (graphics, animations, sounds, fonts, text) can be edited to your heart's content. When finished, the assets can be repackaged and will appear in the game!
